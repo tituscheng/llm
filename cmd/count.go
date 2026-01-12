@@ -18,6 +18,7 @@ var countCmd = &cobra.Command{
 Supports multiple input sources that are concatenated:
   - Existing files or directories
   - "@git" to read all modified and untracked files from git
+  - "@md" to read all markdown files in the current directory
   - "clipboard:" or ":paste" to read from clipboard
   - Plain text (any string that doesn't match a file/directory)
 
@@ -25,7 +26,8 @@ Examples:
   llm count "Hello world"
   llm count ./file.txt
   llm count ./dir/
-  llm count clipboard: ./file.txt "additional text"`,
+  llm count clipboard: ./file.txt "additional text"
+  llm count @md`,
 	Run: func(cmd *cobra.Command, args []string) {
 		sources, err := input.ReadAuto(args)
 		if err != nil {

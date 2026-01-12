@@ -13,18 +13,6 @@ import (
 	"github.com/atotto/clipboard"
 )
 
-// SourceType indicates what kind of input source this is.
-type SourceType int
-
-const (
-	SourceText SourceType = iota
-	SourceFile
-	SourceDir
-	SourceGit
-	SourceClipboard
-	SourceStdin
-)
-
 // Source represents a single input source with its content and token count.
 type Source struct {
 	Type       SourceType
@@ -33,11 +21,25 @@ type Source struct {
 	TokenCount int
 }
 
+// SourceType indicates what kind of input source this is.
+type SourceType int
+
+const (
+	SourceText SourceType = iota
+	SourceFile
+	SourceDir
+	SourceGit
+	SourceMd
+	SourceClipboard
+	SourceStdin
+)
+
 // ReadAuto detects and reads from multiple sources based on their content.
 // Arguments can be:
 //   - File paths (existing files)
 //   - Directory paths (existing directories)
 //   - "@git" to read all modified and untracked files from git
+//   - "@md" to read all markdown files in the current directory
 //   - "clipboard:" to read from clipboard
 //   - Plain text (any other string)
 //
@@ -56,21 +58,27 @@ func ReadAuto(args []string) ([]Source, error) {
 
 	var sources []Source
 	for _, arg := range args {
-		source, err := detectAndRead(arg)
+		detected, err := detectAndRead(arg)
 		if err != nil {
 			return nil, err
 		}
-		sources = append(sources, source)
+		sources = append(sources, detected...)
 	}
 
 	return sources, nil
 }
 
 // detectAndRead detects the source type and reads its content.
-func detectAndRead(arg string) (Source, error) {
+// Returns a slice of sources (multiple for @git and @md).
+func detectAndRead(arg string) ([]Source, error) {
 	// Check for special git keyword
 	if arg == "@git" {
 		return readGit()
+	}
+
+	// Check for special md keyword
+	if arg == "@md" {
+		return readMd(".")
 	}
 
 	// Check for special clipboard keyword
@@ -88,39 +96,37 @@ func detectAndRead(arg string) (Source, error) {
 
 	// Otherwise treat as plain text
 	content := arg
-	return Source{
+	return []Source{{
 		Type:       SourceText,
 		Name:       "text",
 		Content:    content,
 		TokenCount: llm.CountToken(content),
-	}, nil
+	}}, nil
 }
 
 // readFile reads a single file.
-func readFile(path string) (Source, error) {
+func readFile(path string) ([]Source, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Source{}, err
+		return nil, err
 	}
 	content := string(data)
-	return Source{
+	return []Source{{
 		Type:       SourceFile,
 		Name:       path,
 		Content:    content,
 		TokenCount: llm.CountToken(content),
-	}, nil
+	}}, nil
 }
 
 // readDir reads all files in a directory (non-recursively).
-func readDir(dirPath string) (Source, error) {
+func readDir(dirPath string) ([]Source, error) {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
-		return Source{}, err
+		return nil, err
 	}
 
-	var parts []string
-	var fileNames []string
-
+	var sources []Source
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -132,28 +138,26 @@ func readDir(dirPath string) (Source, error) {
 			continue // Skip files that can't be read
 		}
 
-		parts = append(parts, string(data))
-		fileNames = append(fileNames, entry.Name())
+		content := string(data)
+		sources = append(sources, Source{
+			Type:       SourceDir,
+			Name:       entry.Name(),
+			Content:    content,
+			TokenCount: llm.CountToken(content),
+		})
 	}
 
-	content := strings.Join(parts, "\n")
-	return Source{
-		Type:       SourceDir,
-		Name:       dirPath,
-		Content:    content,
-		TokenCount: llm.CountToken(content),
-	}, nil
+	return sources, nil
 }
 
 // readGit reads all modified and untracked files from git.
-func readGit() (Source, error) {
+func readGit() ([]Source, error) {
 	modified, untracked, err := getGitStatusPaths()
 	if err != nil {
-		return Source{}, err
+		return nil, err
 	}
 
-	var parts []string
-	var fileNames []string
+	var sources []Source
 
 	// Modified files
 	for _, path := range modified {
@@ -161,8 +165,13 @@ func readGit() (Source, error) {
 		if err != nil {
 			continue
 		}
-		parts = append(parts, string(data))
-		fileNames = append(fileNames, path)
+		content := string(data)
+		sources = append(sources, Source{
+			Type:       SourceGit,
+			Name:       path,
+			Content:    content,
+			TokenCount: llm.CountToken(content),
+		})
 	}
 
 	// Untracked files
@@ -171,31 +180,65 @@ func readGit() (Source, error) {
 		if err != nil {
 			continue
 		}
-		parts = append(parts, string(data))
-		fileNames = append(fileNames, path)
+		content := string(data)
+		sources = append(sources, Source{
+			Type:       SourceGit,
+			Name:       path,
+			Content:    content,
+			TokenCount: llm.CountToken(content),
+		})
 	}
 
-	content := strings.Join(parts, "\n")
-	return Source{
-		Type:       SourceGit,
-		Name:       "@git",
-		Content:    content,
-		TokenCount: llm.CountToken(content),
-	}, nil
+	return sources, nil
+}
+
+// readMd reads all markdown files in a directory.
+func readMd(dirPath string) ([]Source, error) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var sources []Source
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		if !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+
+		filePath := filepath.Join(dirPath, entry.Name())
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+
+		content := string(data)
+		sources = append(sources, Source{
+			Type:       SourceMd,
+			Name:       entry.Name(),
+			Content:    content,
+			TokenCount: llm.CountToken(content),
+		})
+	}
+
+	return sources, nil
 }
 
 // readClipboard reads content from clipboard.
-func readClipboard() (Source, error) {
+func readClipboard() ([]Source, error) {
 	content, err := clipboard.ReadAll()
 	if err != nil {
-		return Source{}, err
+		return nil, err
 	}
-	return Source{
+	return []Source{{
 		Type:       SourceClipboard,
 		Name:       "clipboard",
 		Content:    content,
 		TokenCount: llm.CountToken(content),
-	}, nil
+	}}, nil
 }
 
 // getGitStatusPaths returns the modified and untracked files from git.
