@@ -1,0 +1,27 @@
+**Bug Summary**
+One-sentence description.
+
+**Steps to Reproduce**
+1. Step one
+2. Step two
+3. ...
+
+**Expected Behavior**
+What should happen.
+
+**Actual Behavior**
+What actually happens.
+
+**Environment**
+- Device/OS: ...
+- Browser/App version: ...
+- Screen size: ...
+
+**Visual Evidence**
+- Screenshot description or link (if attached)
+
+**Severity**
+Low/Medium/High/Critical
+
+**Additional Notes**
+Any extra context.
