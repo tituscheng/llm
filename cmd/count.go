@@ -3,9 +3,9 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"text/tabwriter"
 
 	"llm/internal/input"
-	"llm/internal/llm"
 
 	"github.com/spf13/cobra"
 )
@@ -17,6 +17,7 @@ var countCmd = &cobra.Command{
 
 Supports multiple input sources that are concatenated:
   - Existing files or directories
+  - "@git" to read all modified and untracked files from git
   - "clipboard:" or ":paste" to read from clipboard
   - Plain text (any string that doesn't match a file/directory)
 
@@ -26,19 +27,20 @@ Examples:
   llm count ./dir/
   llm count clipboard: ./file.txt "additional text"`,
 	Run: func(cmd *cobra.Command, args []string) {
-		text, err := input.ReadAuto(args)
+		sources, err := input.ReadAuto(args)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
 			os.Exit(1)
 		}
 
-		if text == "" {
-			fmt.Println("0")
-			return
+		// Print per-source breakdown
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
+		for _, s := range sources {
+			fmt.Fprintf(w, "%s:\t%d tokens\n", s.Name, s.TokenCount)
 		}
-
-		count := llm.CountToken(text)
-		fmt.Println(count)
+		fmt.Fprintln(w, "──────────────────────")
+		fmt.Fprintf(w, "Total:\t%d tokens\n", input.TotalTokens(sources))
+		w.Flush()
 	},
 }
 
