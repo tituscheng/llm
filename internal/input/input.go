@@ -8,12 +8,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"llm/internal/llm"
 
 	"github.com/atotto/clipboard"
 	"github.com/fatih/color"
+	"github.com/gabriel-vasile/mimetype"
 )
 
 // Source represents a single input source with its content and token count.
@@ -60,47 +60,16 @@ func ReadAuto(args []string) ([]Source, error) {
 	}
 
 	var sources []Source
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	resultChan := make(chan Source, 100)
-	errChan := make(chan error, 100)
-	doneChan := make(chan struct{})
-
-	// Process all arguments concurrently
 	for _, arg := range args {
-		wg.Add(1)
-		go func(a string) {
-			defer wg.Done()
-			detected, err := detectAndRead(a)
-			if err != nil {
-				errChan <- err
-				return
-			}
-			for _, s := range detected {
-				resultChan <- s
-			}
-		}(arg)
-	}
-
-	// Wait for all goroutines and close channels
-	go func() {
-		wg.Wait()
-		close(doneChan)
-	}()
-
-	// Collect results and errors
-	for {
-		select {
-		case s := <-resultChan:
-			mu.Lock()
-			sources = append(sources, s)
-			mu.Unlock()
-		case err := <-errChan:
+		detected, err := detectAndRead(arg)
+		if err != nil {
 			color.Yellow("Warning: %v\n", err)
-		case <-doneChan:
-			return sources, nil
+			continue
 		}
+		sources = append(sources, detected...)
 	}
+
+	return sources, nil
 }
 
 // detectAndRead detects the source type and reads its content.
@@ -122,7 +91,8 @@ func detectAndRead(arg string) ([]Source, error) {
 	}
 
 	// Check if it's an existing file or directory
-	if info, err := os.Stat(arg); err == nil {
+	info, err := os.Stat(arg)
+	if err == nil {
 		if info.IsDir() {
 			return readDir(arg)
 		}
@@ -135,26 +105,32 @@ func detectAndRead(arg string) ([]Source, error) {
 		Type:       SourceText,
 		Name:       "text",
 		Content:    content,
-		TokenCount: countTokenConcurrent(content),
+		TokenCount: llm.CountToken(content),
 	}}, nil
 }
 
-// readFile reads a single file concurrently.
+// readFile reads a single file.
 func readFile(path string) ([]Source, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("file not found: %s", path)
 	}
+
+	// Skip binary files using mimetype
+	if !isTextFile(data) {
+		return nil, nil
+	}
+
 	content := string(data)
 	return []Source{{
 		Type:       SourceFile,
 		Name:       path,
 		Content:    content,
-		TokenCount: countTokenConcurrent(content),
+		TokenCount: llm.CountToken(content),
 	}}, nil
 }
 
-// readDir reads all files in a directory (non-recursively) concurrently.
+// readDir reads all files in a directory (non-recursively).
 func readDir(dirPath string) ([]Source, error) {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
@@ -162,50 +138,45 @@ func readDir(dirPath string) ([]Source, error) {
 	}
 
 	var sources []Source
-	var wg sync.WaitGroup
-	resultChan := make(chan Source, len(entries))
-
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 
-		wg.Add(1)
-		go func(e os.DirEntry) {
-			defer wg.Done()
+		// Skip hidden files
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
 
-			filePath := filepath.Join(dirPath, e.Name())
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				color.Yellow("  ⚠ Could not read: %s\n", e.Name())
-				return
-			}
+		// Skip binary files
+		filePath := filepath.Join(dirPath, entry.Name())
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
 
-			content := string(data)
-			resultChan <- Source{
-				Type:       SourceDir,
-				Name:       e.Name(),
-				Content:    content,
-				TokenCount: countTokenConcurrent(content),
-			}
-		}(entry)
-	}
+		// Skip binary files using mimetype
+		if !isTextFile(data) {
+			continue
+		}
 
-	wg.Wait()
-	close(resultChan)
-
-	for s := range resultChan {
-		sources = append(sources, s)
+		content := string(data)
+		sources = append(sources, Source{
+			Type:       SourceDir,
+			Name:       entry.Name(),
+			Content:    content,
+			TokenCount: llm.CountToken(content),
+		})
 	}
 
 	if len(sources) == 0 {
-		return nil, fmt.Errorf("no readable files in: %s", dirPath)
+		return nil, fmt.Errorf("no readable text files in: %s", dirPath)
 	}
 
 	return sources, nil
 }
 
-// readGit reads all modified and untracked files from git concurrently.
+// readGit reads all modified and untracked files from git.
 func readGit() ([]Source, error) {
 	// Check if we're in a git repository
 	if !isGitRepo() {
@@ -222,64 +193,59 @@ func readGit() ([]Source, error) {
 	}
 
 	var sources []Source
-	var wg sync.WaitGroup
-	resultChan := make(chan Source, len(modified)+len(untracked))
 
 	// Process modified files
 	for _, path := range modified {
-		wg.Add(1)
-		go func(p string) {
-			defer wg.Done()
+		// Skip hidden files
+		if strings.HasPrefix(filepath.Base(path), ".") {
+			continue
+		}
+		if !isTextFileByPath(path) {
+			continue
+		}
 
-			data, err := os.ReadFile(p)
-			if err != nil {
-				color.Yellow("  ⚠ Could not read: %s\n", p)
-				return
-			}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
 
-			content := string(data)
-			resultChan <- Source{
-				Type:       SourceGit,
-				Name:       p,
-				Content:    content,
-				TokenCount: countTokenConcurrent(content),
-			}
-		}(path)
+		content := string(data)
+		sources = append(sources, Source{
+			Type:       SourceGit,
+			Name:       path,
+			Content:    content,
+			TokenCount: llm.CountToken(content),
+		})
 	}
 
 	// Process untracked files
 	for _, path := range untracked {
-		wg.Add(1)
-		go func(p string) {
-			defer wg.Done()
+		// Skip hidden files
+		if strings.HasPrefix(filepath.Base(path), ".") {
+			continue
+		}
+		if !isTextFileByPath(path) {
+			continue
+		}
 
-			data, err := os.ReadFile(p)
-			if err != nil {
-				color.Yellow("  ⚠ Could not read: %s\n", p)
-				return
-			}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
 
-			content := string(data)
-			resultChan <- Source{
-				Type:       SourceGit,
-				Name:       p,
-				Content:    content,
-				TokenCount: countTokenConcurrent(content),
-			}
-		}(path)
-	}
-
-	wg.Wait()
-	close(resultChan)
-
-	for s := range resultChan {
-		sources = append(sources, s)
+		content := string(data)
+		sources = append(sources, Source{
+			Type:       SourceGit,
+			Name:       path,
+			Content:    content,
+			TokenCount: llm.CountToken(content),
+		})
 	}
 
 	return sources, nil
 }
 
-// readMd reads all markdown files in a directory concurrently.
+// readMd reads all markdown files in a directory.
 func readMd(dirPath string) ([]Source, error) {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
@@ -287,50 +253,42 @@ func readMd(dirPath string) ([]Source, error) {
 	}
 
 	var sources []Source
-	var wg sync.WaitGroup
-	resultChan := make(chan Source, len(entries))
-	var found bool
-
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 
-		if !strings.HasSuffix(entry.Name(), ".md") {
+		// Only process markdown files
+		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".md") {
 			continue
 		}
 
-		found = true
-		wg.Add(1)
+		// Skip hidden files
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
 
-		go func(e os.DirEntry) {
-			defer wg.Done()
+		filePath := filepath.Join(dirPath, entry.Name())
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
 
-			filePath := filepath.Join(dirPath, e.Name())
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				color.Yellow("  ⚠ Could not read: %s\n", e.Name())
-				return
-			}
+		// Skip binary files using mimetype
+		if !isTextFile(data) {
+			continue
+		}
 
-			content := string(data)
-			resultChan <- Source{
-				Type:       SourceMd,
-				Name:       e.Name(),
-				Content:    content,
-				TokenCount: countTokenConcurrent(content),
-			}
-		}(entry)
+		content := string(data)
+		sources = append(sources, Source{
+			Type:       SourceMd,
+			Name:       entry.Name(),
+			Content:    content,
+			TokenCount: llm.CountToken(content),
+		})
 	}
 
-	wg.Wait()
-	close(resultChan)
-
-	for s := range resultChan {
-		sources = append(sources, s)
-	}
-
-	if !found {
+	if len(sources) == 0 {
 		return nil, fmt.Errorf("no markdown files found in: %s", dirPath)
 	}
 
@@ -347,7 +305,7 @@ func readClipboard() ([]Source, error) {
 		Type:       SourceClipboard,
 		Name:       "clipboard",
 		Content:    content,
-		TokenCount: countTokenConcurrent(content),
+		TokenCount: llm.CountToken(content),
 	}}, nil
 }
 
@@ -357,9 +315,41 @@ func isGitRepo() bool {
 	return err == nil
 }
 
-// countTokenConcurrent counts tokens in a goroutine.
-func countTokenConcurrent(content string) int {
-	return llm.CountToken(content)
+// isTextFile checks if file content is text (not binary) using mimetype.
+func isTextFile(data []byte) bool {
+	mime := mimetype.Detect(data)
+	mimeStr := mime.String()
+
+	// Exclude common binary types
+	excludeMimes := []string{
+		"image/", "video/", "audio/",
+		"application/pdf",
+		"application/zip", "application/x-rar", "application/gzip",
+		"application/x-executable", "application/x-sharedlib",
+		"application/octet-stream",
+	}
+	for _, prefix := range excludeMimes {
+		if strings.HasPrefix(mimeStr, prefix) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isTextFileByPath checks if a file is text by reading a small portion.
+func isTextFileByPath(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	// Read first 512 bytes to detect type
+	buf := make([]byte, 512)
+	n, _ := file.Read(buf)
+
+	return isTextFile(buf[:n])
 }
 
 // getGitStatusPaths returns the modified and untracked files from git.
