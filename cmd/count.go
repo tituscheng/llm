@@ -1,12 +1,12 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 	"text/tabwriter"
 
 	"llm/internal/input"
 
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
@@ -15,33 +15,34 @@ var countCmd = &cobra.Command{
 	Short: "Count tokens in text",
 	Long: `Count the number of tokens in the given text using tiktoken encoding.
 
-Supports multiple input sources that are concatenated:
-  - Existing files or directories
-  - "@git" to read all modified and untracked files from git
-  - "@md" to read all markdown files in the current directory
-  - "clipboard:" or ":paste" to read from clipboard
-  - Plain text (any string that doesn't match a file/directory)
-
-Examples:
-  llm count "Hello world"
-  llm count ./file.txt
-  llm count ./dir/
-  llm count clipboard: ./file.txt "additional text"
-  llm count @md`,
+Supports multiple input sources:
+  - File paths (existing files)
+  - Directory paths (reads all files)
+  - "@git" for modified/untracked files
+  - "@md" for markdown files in current directory
+  - "clipboard:", ":paste" for clipboard
+  - Plain text`,
 	Run: func(cmd *cobra.Command, args []string) {
 		sources, err := input.ReadAuto(args)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
+			color.Red("Error: %v\n", err)
 			os.Exit(1)
 		}
 
-		// Print per-source breakdown
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
-		for _, s := range sources {
-			fmt.Fprintf(w, "%s:\t%d tokens\n", s.Name, s.TokenCount)
+		if len(sources) == 0 {
+			color.Yellow("No sources found.\n")
+			return
 		}
-		fmt.Fprintln(w, "──────────────────────")
-		fmt.Fprintf(w, "Total:\t%d tokens\n", input.TotalTokens(sources))
+
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', tabwriter.AlignRight)
+		cyan := color.New(color.FgCyan)
+		green := color.New(color.FgGreen)
+
+		for _, s := range sources {
+			cyan.Fprintf(w, "%s:\t%d tokens\n", s.Name, s.TokenCount)
+		}
+		green.Fprintln(w, "──────────────────────")
+		green.Fprintf(w, "Total:\t%d tokens\n", input.TotalTokens(sources))
 		w.Flush()
 	},
 }
