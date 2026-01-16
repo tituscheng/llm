@@ -16,6 +16,7 @@ func NewMainWindow(app fyne.App) fyne.Window {
 		UITab(myWindow),
 		CountTab(myWindow),
 		AgentTab(myWindow),
+		MentorTab(myWindow),
 		SettingsTab(),
 	)
 

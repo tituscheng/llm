@@ -37,20 +37,114 @@ const (
 	SourceStdin
 )
 
+// FileSystem defines the interface for file operations.
+// This allows mocking in tests.
+type FileSystem interface {
+	ReadFile(path string) ([]byte, error)
+	ReadDir(path string) ([]os.DirEntry, error)
+	Stat(path string) (os.FileInfo, error)
+	Open(path string) (*os.File, error)
+}
+
+// GitExecutor defines the interface for git operations.
+// This allows mocking in tests.
+type GitExecutor interface {
+	StatusPorcelain() ([]byte, error)
+}
+
+// ClipboardReader defines the interface for clipboard operations.
+// This allows mocking in tests.
+type ClipboardReader interface {
+	ReadAll() (string, error)
+}
+
+// StdinReader defines the interface for stdin operations.
+// This allows mocking in tests.
+type StdinReader interface {
+	ReadAll() string
+}
+
+// Default implementations
+type defaultFileSystem struct{}
+
+func (fs defaultFileSystem) ReadFile(path string) ([]byte, error) {
+	return os.ReadFile(path)
+}
+
+func (fs defaultFileSystem) ReadDir(path string) ([]os.DirEntry, error) {
+	return os.ReadDir(path)
+}
+
+func (fs defaultFileSystem) Stat(path string) (os.FileInfo, error) {
+	return os.Stat(path)
+}
+
+func (fs defaultFileSystem) Open(path string) (*os.File, error) {
+	return os.Open(path)
+}
+
+type defaultGitExecutor struct{}
+
+func (g defaultGitExecutor) StatusPorcelain() ([]byte, error) {
+	cmd := exec.Command("git", "status", "--porcelain=v2", "-z")
+	return cmd.Output()
+}
+
+type defaultClipboardReader struct{}
+
+func (r defaultClipboardReader) ReadAll() (string, error) {
+	return clipboard.ReadAll()
+}
+
+type defaultStdinReader struct{}
+
+func (r defaultStdinReader) ReadAll() string {
+	scanner := bufio.NewScanner(os.Stdin)
+	var lines []string
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	return strings.Join(lines, "\n")
+}
+
+// Dependencies holds all external dependencies for the input package.
+// These can be replaced with mocks for testing.
+type Dependencies struct {
+	FS        FileSystem
+	Git       GitExecutor
+	Clipboard ClipboardReader
+	Stdin     StdinReader
+}
+
+// DefaultDependencies returns the default dependencies.
+func DefaultDependencies() *Dependencies {
+	return &Dependencies{
+		FS:        defaultFileSystem{},
+		Git:       defaultGitExecutor{},
+		Clipboard: defaultClipboardReader{},
+		Stdin:     defaultStdinReader{},
+	}
+}
+
 // ReadAuto detects and reads from multiple sources based on their content.
 // Arguments can be:
 //   - File paths (existing files)
 //   - Directory paths (existing directories)
 //   - "@git" to read all modified and untracked files from git
 //   - "@md" to read all markdown files in the current directory
-//   - "clipboard:" to read from clipboard
+//   - "clipboard:" or ":clip" or ":paste" to read from clipboard
 //   - Plain text (any other string)
 //
 // All sources are concatenated with newlines.
 func ReadAuto(args []string) ([]Source, error) {
+	return ReadAutoWithDeps(args, DefaultDependencies())
+}
+
+// ReadAutoWithDeps is like ReadAuto but with custom dependencies.
+func ReadAutoWithDeps(args []string, deps *Dependencies) ([]Source, error) {
 	if len(args) == 0 {
 		// Read from stdin
-		content := readStdin()
+		content := deps.Stdin.ReadAll()
 		return []Source{{
 			Type:       SourceStdin,
 			Name:       "stdin",
@@ -61,7 +155,7 @@ func ReadAuto(args []string) ([]Source, error) {
 
 	var sources []Source
 	for _, arg := range args {
-		detected, err := detectAndRead(arg)
+		detected, err := detectAndRead(arg, deps)
 		if err != nil {
 			color.Yellow("Warning: %v\n", err)
 			continue
@@ -74,29 +168,29 @@ func ReadAuto(args []string) ([]Source, error) {
 
 // detectAndRead detects the source type and reads its content.
 // Returns a slice of sources (multiple for @git and @md).
-func detectAndRead(arg string) ([]Source, error) {
+func detectAndRead(arg string, deps *Dependencies) ([]Source, error) {
 	// Check for special git keyword
 	if arg == "@git" {
-		return readGit()
+		return readGit(deps)
 	}
 
 	// Check for special md keyword
 	if arg == "@md" {
-		return readMd(".")
+		return readMd(".", deps)
 	}
 
 	// Check for special clipboard keyword
 	if strings.HasPrefix(arg, "clipboard:") || arg == ":clip" || arg == ":paste" {
-		return readClipboard()
+		return readClipboard(deps)
 	}
 
 	// Check if it's an existing file or directory
-	info, err := os.Stat(arg)
+	info, err := deps.FS.Stat(arg)
 	if err == nil {
 		if info.IsDir() {
-			return readDir(arg)
+			return readDir(arg, deps)
 		}
-		return readFile(arg)
+		return readFile(arg, deps)
 	}
 
 	// Otherwise treat as plain text
@@ -110,8 +204,8 @@ func detectAndRead(arg string) ([]Source, error) {
 }
 
 // readFile reads a single file.
-func readFile(path string) ([]Source, error) {
-	data, err := os.ReadFile(path)
+func readFile(path string, deps *Dependencies) ([]Source, error) {
+	data, err := deps.FS.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("file not found: %s", path)
 	}
@@ -131,8 +225,8 @@ func readFile(path string) ([]Source, error) {
 }
 
 // readDir reads all files in a directory (non-recursively).
-func readDir(dirPath string) ([]Source, error) {
-	entries, err := os.ReadDir(dirPath)
+func readDir(dirPath string, deps *Dependencies) ([]Source, error) {
+	entries, err := deps.FS.ReadDir(dirPath)
 	if err != nil {
 		return nil, fmt.Errorf("directory not found: %s", dirPath)
 	}
@@ -150,7 +244,7 @@ func readDir(dirPath string) ([]Source, error) {
 
 		// Skip binary files
 		filePath := filepath.Join(dirPath, entry.Name())
-		data, err := os.ReadFile(filePath)
+		data, err := deps.FS.ReadFile(filePath)
 		if err != nil {
 			continue
 		}
@@ -177,13 +271,13 @@ func readDir(dirPath string) ([]Source, error) {
 }
 
 // readGit reads all modified and untracked files from git.
-func readGit() ([]Source, error) {
+func readGit(deps *Dependencies) ([]Source, error) {
 	// Check if we're in a git repository
-	if !isGitRepo() {
+	if !isGitRepo(deps.FS) {
 		return nil, fmt.Errorf("not a git repository (must run from a directory with .git)")
 	}
 
-	modified, untracked, err := getGitStatusPaths()
+	modified, untracked, err := getGitStatusPaths(deps.Git)
 	if err != nil {
 		return nil, fmt.Errorf("git command failed: %w", err)
 	}
@@ -200,11 +294,11 @@ func readGit() ([]Source, error) {
 		if strings.HasPrefix(filepath.Base(path), ".") {
 			continue
 		}
-		if !isTextFileByPath(path) {
+		if !isTextFileByPath(path, deps.FS) {
 			continue
 		}
 
-		data, err := os.ReadFile(path)
+		data, err := deps.FS.ReadFile(path)
 		if err != nil {
 			continue
 		}
@@ -224,11 +318,11 @@ func readGit() ([]Source, error) {
 		if strings.HasPrefix(filepath.Base(path), ".") {
 			continue
 		}
-		if !isTextFileByPath(path) {
+		if !isTextFileByPath(path, deps.FS) {
 			continue
 		}
 
-		data, err := os.ReadFile(path)
+		data, err := deps.FS.ReadFile(path)
 		if err != nil {
 			continue
 		}
@@ -246,8 +340,8 @@ func readGit() ([]Source, error) {
 }
 
 // readMd reads all markdown files in a directory.
-func readMd(dirPath string) ([]Source, error) {
-	entries, err := os.ReadDir(dirPath)
+func readMd(dirPath string, deps *Dependencies) ([]Source, error) {
+	entries, err := deps.FS.ReadDir(dirPath)
 	if err != nil {
 		return nil, fmt.Errorf("directory not found: %s", dirPath)
 	}
@@ -269,7 +363,7 @@ func readMd(dirPath string) ([]Source, error) {
 		}
 
 		filePath := filepath.Join(dirPath, entry.Name())
-		data, err := os.ReadFile(filePath)
+		data, err := deps.FS.ReadFile(filePath)
 		if err != nil {
 			continue
 		}
@@ -296,8 +390,8 @@ func readMd(dirPath string) ([]Source, error) {
 }
 
 // readClipboard reads content from clipboard.
-func readClipboard() ([]Source, error) {
-	content, err := clipboard.ReadAll()
+func readClipboard(deps *Dependencies) ([]Source, error) {
+	content, err := deps.Clipboard.ReadAll()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read clipboard: %w", err)
 	}
@@ -310,8 +404,8 @@ func readClipboard() ([]Source, error) {
 }
 
 // isGitRepo checks if the current directory is a git repository.
-func isGitRepo() bool {
-	_, err := os.Stat(".git")
+func isGitRepo(fs FileSystem) bool {
+	_, err := fs.Stat(".git")
 	return err == nil
 }
 
@@ -338,8 +432,8 @@ func isTextFile(data []byte) bool {
 }
 
 // isTextFileByPath checks if a file is text by reading a small portion.
-func isTextFileByPath(path string) bool {
-	file, err := os.Open(path)
+func isTextFileByPath(path string, fs FileSystem) bool {
+	file, err := fs.Open(path)
 	if err != nil {
 		return false
 	}
@@ -353,9 +447,8 @@ func isTextFileByPath(path string) bool {
 }
 
 // getGitStatusPaths returns the modified and untracked files from git.
-func getGitStatusPaths() ([]string, []string, error) {
-	cmd := exec.Command("git", "status", "--porcelain=v2", "-z")
-	output, err := cmd.Output()
+func getGitStatusPaths(git GitExecutor) ([]string, []string, error) {
+	output, err := git.StatusPorcelain()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -412,16 +505,6 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
-}
-
-// readStdin reads all content from standard input.
-func readStdin() string {
-	scanner := bufio.NewScanner(os.Stdin)
-	var lines []string
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	return strings.Join(lines, "\n")
 }
 
 // TotalTokens calculates the total token count from a slice of sources.

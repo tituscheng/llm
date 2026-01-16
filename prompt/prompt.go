@@ -16,4 +16,7 @@ var (
 
 	//go:embed ui_debug_template.txt
 	UIDebugTemplate string
+
+	//go:embed prompt_mentor.txt
+	PromptMentorTemplate string
 )

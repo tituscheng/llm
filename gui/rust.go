@@ -2,9 +2,8 @@ package gui
 
 import (
 	"fmt"
+	"llm/internal/llm"
 	"llm/prompt"
-	"strings"
-	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -58,7 +57,7 @@ func RustTab(window fyne.Window) *container.TabItem {
 
 	// Update token count in real-time whenever text changes
 	promptEntry.OnChanged = func(s string) {
-		tokenCount := countTokens(s)
+		tokenCount := llm.CountToken(s)
 		tokenCountBind.Set(fmt.Sprintf("Tokens: %d", tokenCount))
 	}
 
@@ -66,76 +65,4 @@ func RustTab(window fyne.Window) *container.TabItem {
 	tokenCountBind.Set("Tokens: 0")
 
 	return container.NewTabItem("Rust", content)
-}
-
-// countTokens estimates the number of tokens in the given text.
-// Uses a simple approximation: splits by whitespace and common punctuation.
-// Tokens are roughly 4 characters per token on average for English text.
-func countTokens(text string) int {
-	if text == "" {
-		return 0
-	}
-
-	// Replace common punctuation with spaces to split properly
-	replacer := strings.NewReplacer(
-		",", " ",
-		".", " ",
-		"!", " ",
-		"?", " ",
-		";", " ",
-		":", " ",
-		"(", " ",
-		")", " ",
-		"[", " ",
-		"]", " ",
-		"{", " ",
-		"}", " ",
-		"\n", " ",
-		"\t", " ",
-	)
-	normalized := replacer.Replace(text)
-
-	// Split by whitespace and filter empty strings
-	words := strings.Fields(normalized)
-
-	// Estimate tokens: most tokens are words, but also count based on character length
-	// Rule of thumb: ~4 characters = 1 token
-	tokenCount := len(words)
-	totalChars := len(strings.Join(words, ""))
-	charBasedTokens := totalChars / 4
-
-	// Use the maximum of word count and character-based estimation
-	if charBasedTokens > tokenCount {
-		return charBasedTokens
-	}
-	return tokenCount
-}
-
-// showBriefAlert displays a temporary toast notification using PopUp that auto-dismisses.
-// No user interaction required - it appears and disappears automatically.
-func showBriefAlert(window fyne.Window, message string) {
-	// Create notification label
-	notifLabel := widget.NewLabel("✓ " + message)
-
-	// Create a PopUp centered at the top of the window
-	popup := widget.NewPopUp(notifLabel, window.Canvas())
-
-	// Get window size to center the popup
-	size := window.Canvas().Size()
-	popup.Move(fyne.NewPos(
-		(size.Width-200)/2,
-		50,
-	))
-	popup.Resize(fyne.NewSize(200, 40))
-
-	// Show the popup
-	popup.Show()
-
-	// Auto-dismiss after 2 seconds using fyne.Do() for thread-safe UI updates
-	go func() {
-		time.Sleep(2 * time.Second)
-		fyne.Do(func() {
-			popup.Hide()
-		})
-	}()
 }
