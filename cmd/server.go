@@ -4,11 +4,8 @@ import "github.com/spf13/cobra"
 
 var serverCmd = &cobra.Command{
 	Use:   "server",
-	Short: "Run the llama.cpp server",
-	Long:  "Start the llama.cpp server for serving LLM models via API.",
-	Run: func(cmd *cobra.Command, args []string) {
-
-	},
+	Short: "Manage llama.cpp server",
+	Long:  "Utility command for managing llama.cpp server instances. Use --help to see available subcommands.",
 }
 
 func init() {
