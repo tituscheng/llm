@@ -1,8 +1,0 @@
-Refer ONLY to:
-Repo: https://github.com/ORG/REPO
-Branch: main
-Paths:
-- src/main.rs
-- src/lib.rs
-
-If a symbol or behavior is not present in these files, say “not defined”.

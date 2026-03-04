@@ -1,3 +1,0 @@
-When answering, only rely on the official GitHub repository code.
-If something cannot be confirmed from the repo, say “not found in repo”.
-Do not speculate.

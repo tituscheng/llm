@@ -7,8 +7,8 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "llm",
-	Short: "llm ",
-	Long:  "llm",
+	Short: "LLM CLI tool",
+	Long:  "A command-line interface for working with LLM models via llama.cpp.",
 }
 
 func Execute() {
