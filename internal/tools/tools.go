@@ -2,7 +2,7 @@ package tools
 
 import _ "embed"
 
-const LlamaServerVersion = "e877ad8 (2026-02-22)"
+const LlamaServerVersion = "v0.2.0 (bb4caa7, 2026-08-21)"
 
-//go:embed llama-e877ad8/llama-server
+//go:embed llama-v0.2.0/llama-server
 var LlamaServerBinary []byte
