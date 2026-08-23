@@ -42,21 +42,3 @@ const AudioCPPVersion = "master-62735ea (62735ea, 2026-08-22)"
 
 //go:embed audio.cpp-62735ea/audio.cpp
 var AudioCPPBinary []byte
-
-// Binary is an embedded executable that can be copied to the working directory.
-type Binary struct {
-	Name    string
-	Version string
-	Data    []byte
-}
-
-// AudioBinaries returns the embedded Apple Silicon audio tools.
-func AudioBinaries() []Binary {
-	return []Binary{
-		{Name: "piper", Version: PiperVersion, Data: PiperBinary},
-		{Name: "bark.cpp", Version: BarkVersion, Data: BarkBinary},
-		{Name: "tts.cpp", Version: TTSCPPVersion, Data: TTSCPPBinary},
-		{Name: "llama-tts", Version: LlamaTTSVersion, Data: LlamaTTSBinary},
-		{Name: "audio.cpp", Version: AudioCPPVersion, Data: AudioCPPBinary},
-	}
-}
