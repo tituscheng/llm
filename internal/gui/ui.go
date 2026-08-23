@@ -1,9 +1,11 @@
 package gui
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"path/filepath"
 	"sync"
 
@@ -18,8 +20,14 @@ import (
 	"gioui.org/widget/material"
 
 	"llm/internal/install"
+	"llm/internal/scripts"
+	"llm/internal/taskrun"
 	"llm/internal/tools"
 )
+
+type scriptRunner func(ctx context.Context, name, dest string, stdout, stderr io.Writer) error
+
+var runScript scriptRunner = taskrun.Run
 
 type (
 	C = layout.Context
@@ -44,12 +52,20 @@ type ui struct {
 	category widget.Enum
 	binary   widget.Enum
 	install  widget.Clickable
+	script   widget.Clickable
+	close    widget.Clickable
+	scrim    widget.Clickable
 	list     widget.List
+	logList  widget.List
 
-	mu     sync.Mutex
-	busy   bool
-	status string
-	kind   statusKind
+	mu         sync.Mutex
+	busy       bool
+	showModal  bool
+	status     string
+	kind       statusKind
+	modalTitle string
+	logLines   []string
+	cancel     context.CancelFunc
 }
 
 func newUI(win *app.Window, th *material.Theme, dest string) *ui {
@@ -59,8 +75,11 @@ func newUI(win *app.Window, th *material.Theme, dest string) *ui {
 		th:     th,
 		dest:   dest,
 		cats:   cats,
-		status: "Select a category and binary, then click Install.",
+		status: "Select a category and binary, then Install or Install Script.",
 		list: widget.List{
+			List: layout.List{Axis: layout.Vertical},
+		},
+		logList: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
 	}
@@ -74,24 +93,48 @@ func newUI(win *app.Window, th *material.Theme, dest string) *ui {
 }
 
 func (ui *ui) Layout(gtx C) D {
-	if ui.category.Update(gtx) {
-		ui.list.Position = layout.Position{}
-		ui.syncBinary()
-	}
-	ui.binary.Update(gtx)
-	ui.syncBinary()
+	ui.mu.Lock()
+	modal := ui.showModal
+	ui.mu.Unlock()
 
-	for ui.install.Clicked(gtx) {
-		ui.startInstall()
+	if !modal {
+		if ui.category.Update(gtx) {
+			ui.list.Position = layout.Position{}
+			ui.syncBinary()
+		}
+		ui.binary.Update(gtx)
+		ui.syncBinary()
+		for ui.install.Clicked(gtx) {
+			ui.startInstall()
+		}
+		for ui.script.Clicked(gtx) {
+			ui.startScript()
+		}
+	} else {
+		for ui.close.Clicked(gtx) {
+			ui.requestCloseModal()
+		}
+		for ui.scrim.Clicked(gtx) {
+			ui.requestCloseModal()
+		}
 	}
 
 	paint.Fill(gtx.Ops, ui.th.Palette.Bg)
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(ui.layoutHeader),
-		layout.Rigid(func(gtx C) D { return hairline(gtx, rgb(0x2a2e37)) }),
-		layout.Flexed(1, ui.layoutBody),
-		layout.Rigid(func(gtx C) D { return hairline(gtx, rgb(0x2a2e37)) }),
-		layout.Rigid(ui.layoutFooter),
+	main := func(gtx C) D {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(ui.layoutHeader),
+			layout.Rigid(func(gtx C) D { return hairline(gtx, rgb(0x2a2e37)) }),
+			layout.Flexed(1, ui.layoutBody),
+			layout.Rigid(func(gtx C) D { return hairline(gtx, rgb(0x2a2e37)) }),
+			layout.Rigid(ui.layoutFooter),
+		)
+	}
+	if !modal {
+		return main(gtx)
+	}
+	return layout.Stack{}.Layout(gtx,
+		layout.Expanded(main),
+		layout.Expanded(ui.layoutModal),
 	)
 }
 
@@ -108,7 +151,7 @@ func (ui *ui) layoutHeader(gtx C) D {
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 			layout.Rigid(func(gtx C) D {
-				l := material.Body1(ui.th, "Pick a category, then a binary, and copy it into the working directory.")
+				l := material.Body1(ui.th, "Pick a category and binary. Install copies the embedded build; Install Script compiles the latest sources.")
 				l.Color = rgb(0x9aa0a6)
 				return l.Layout(gtx)
 			}),
@@ -357,15 +400,33 @@ func (ui *ui) layoutFooter(gtx C) D {
 							}),
 						)
 					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(16)}.Layout),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+					layout.Rigid(func(gtx C) D {
+						label := "Install Script"
+						hasScript := ok && scripts.Has(bin.Name)
+						btnCtx := gtx
+						if busy || !hasScript {
+							btnCtx = btnCtx.Disabled()
+						}
+						btn := material.Button(ui.th, &ui.script, label)
+						btn.Background = rgb(0x3a414d)
+						btn.CornerRadius = unit.Dp(8)
+						btn.Inset = layout.Inset{
+							Top: unit.Dp(10), Bottom: unit.Dp(10),
+							Left: unit.Dp(16), Right: unit.Dp(16),
+						}
+						return btn.Layout(btnCtx)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx C) D {
 						label := "Install"
+						btnCtx := gtx
 						if busy {
 							label = "Installing…"
-							gtx = gtx.Disabled()
+							btnCtx = btnCtx.Disabled()
 						}
 						if !ok {
-							gtx = gtx.Disabled()
+							btnCtx = btnCtx.Disabled()
 						}
 						btn := material.Button(ui.th, &ui.install, label)
 						btn.CornerRadius = unit.Dp(8)
@@ -373,7 +434,7 @@ func (ui *ui) layoutFooter(gtx C) D {
 							Top: unit.Dp(10), Bottom: unit.Dp(10),
 							Left: unit.Dp(22), Right: unit.Dp(22),
 						}
-						return btn.Layout(gtx)
+						return btn.Layout(btnCtx)
 					}),
 				)
 			}),
@@ -421,6 +482,80 @@ func (ui *ui) syncBinary() {
 	ui.binary.Value = cat.Binaries[0].Name
 }
 
+func (ui *ui) appendLog(line string) {
+	ui.mu.Lock()
+	ui.logLines = appendCapped(ui.logLines, line)
+	n := len(ui.logLines)
+	ui.mu.Unlock()
+	ui.logList.Position.First = n - 1
+	if ui.logList.Position.First < 0 {
+		ui.logList.Position.First = 0
+	}
+	ui.invalidate()
+}
+
+func (ui *ui) startScript() {
+	bin, ok := ui.selectedBinary()
+	if !ok {
+		ui.mu.Lock()
+		ui.status = "Select a binary first."
+		ui.kind = statusErr
+		ui.mu.Unlock()
+		return
+	}
+	if !scripts.Has(bin.Name) {
+		ui.mu.Lock()
+		ui.status = "No compile script for " + bin.Name + "."
+		ui.kind = statusErr
+		ui.mu.Unlock()
+		return
+	}
+
+	ui.mu.Lock()
+	if ui.busy {
+		ui.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ui.busy = true
+	ui.showModal = true
+	ui.modalTitle = "Install Script — " + bin.Name
+	ui.status = "Compiling latest " + bin.Name + "…"
+	ui.kind = statusBusy
+	ui.logLines = nil
+	ui.logList.Position = layout.Position{}
+	ui.cancel = cancel
+	dest := ui.dest
+	ui.mu.Unlock()
+
+	out := &lineWriter{append: ui.appendLog}
+	go func() {
+		err := runScript(ctx, bin.Name, dest, out, out)
+		out.flush()
+		ui.mu.Lock()
+		ui.busy = false
+		ui.cancel = nil
+		if ctx.Err() != nil {
+			ui.status = "Cancelled."
+			ui.kind = statusErr
+		} else if err != nil {
+			ui.status = err.Error()
+			ui.kind = statusErr
+		} else {
+			ui.status = "Installed latest " + bin.Name + " to " + filepath.Join(dest, bin.Name)
+			ui.kind = statusOK
+		}
+		ui.mu.Unlock()
+		ui.invalidate()
+	}()
+}
+
+func (ui *ui) invalidate() {
+	if ui.win != nil {
+		ui.win.Invalidate()
+	}
+}
+
 func (ui *ui) startInstall() {
 	bin, ok := ui.selectedBinary()
 	if !ok {
@@ -454,7 +589,7 @@ func (ui *ui) startInstall() {
 			ui.kind = statusOK
 		}
 		ui.mu.Unlock()
-		ui.win.Invalidate()
+		ui.invalidate()
 	}()
 }
 

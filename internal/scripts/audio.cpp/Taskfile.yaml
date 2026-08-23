@@ -1,0 +1,63 @@
+version: "3"
+
+vars:
+  DEST: '{{.DEST | default "."}}'
+  WORK: '{{.WORK}}'
+  REPO: https://github.com/0xShug0/audio.cpp.git
+  JOBS:
+    sh: sysctl -n hw.logicalcpu 2>/dev/null || echo 8
+
+tasks:
+  default:
+    desc: Build the latest standalone audio.cpp CLI (Apple Silicon, Metal) into DEST
+    platforms: [darwin]
+    cmds:
+      - defer: rm -rf "{{.WORK}}/src" "{{.WORK}}/build" "{{.WORK}}/install"
+      - task: build
+      - task: install
+
+  cleanup:
+    desc: Remove clone and build trees so only installed binaries remain
+    cmds:
+      - |
+        rm -rf "{{.WORK}}/src" "{{.WORK}}/build" "{{.WORK}}/install"
+
+  build:
+    internal: true
+    cmds:
+      - |
+        set -euo pipefail
+        test -n "{{.WORK}}"
+        test -d "{{.DEST}}"
+        command -v git >/dev/null
+        command -v cmake >/dev/null
+        SRC="{{.WORK}}/src"
+        rm -rf "$SRC" "{{.WORK}}/build"
+        REF="$(git ls-remote --tags --refs "{{.REPO}}" | awk -F/ '{print $NF}' | sort -V | tail -1)"
+        echo "audio.cpp latest tag: ${REF:-HEAD}"
+        if [ -n "$REF" ]; then
+          git clone --depth 1 --recurse-submodules --shallow-submodules --branch "$REF" "{{.REPO}}" "$SRC"
+        else
+          git clone --depth 1 --recurse-submodules --shallow-submodules "{{.REPO}}" "$SRC"
+        fi
+        echo "audio.cpp commit: $(git -C "$SRC" rev-parse --short HEAD)"
+        "$SRC/scripts/build_metal.sh" \
+          --build-dir "{{.WORK}}/build" \
+          --build-type Release \
+          --archs arm64 \
+          --openmp OFF \
+          --embed-metal ON \
+          --deployment-build \
+          --jobs "{{.JOBS}}" \
+          --target audiocpp_cli
+
+  install:
+    internal: true
+    cmds:
+      - |
+        set -euo pipefail
+        BIN="$(find "{{.WORK}}/build" -type f -name audiocpp_cli -perm -111 | head -n 1)"
+        test -n "$BIN"
+        install -m 0755 "$BIN" "{{.DEST}}/audio.cpp"
+        strip -x "{{.DEST}}/audio.cpp" || true
+        echo "installed {{.DEST}}/audio.cpp"

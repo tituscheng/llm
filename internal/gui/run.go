@@ -33,8 +33,8 @@ func run() error {
 	w := new(app.Window)
 	w.Option(
 		app.Title("llm — install binaries"),
-		app.Size(unit.Dp(900), unit.Dp(620)),
-		app.MinSize(unit.Dp(720), unit.Dp(480)),
+		app.Size(unit.Dp(960), unit.Dp(640)),
+		app.MinSize(unit.Dp(760), unit.Dp(500)),
 	)
 
 	dest, err := os.Getwd()
