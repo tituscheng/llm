@@ -255,6 +255,10 @@ for token, err := range srv.ChatStream(ctx, []serve.Message{
 
 `Start` listens on `127.0.0.1` and returns after `/health` says the model is ready. Cancelling `ctx` stops the process. `Stop` kills the server and its child processes, and a second call does nothing. `Close` calls `Stop`. `IsAlive` returns false when the process has exited or the model is still loading. `Chat` posts the messages to `/v1/chat/completions` and returns the assistant text. `ChatStream` sets `stream` and yields each token from the server-sent events. Ending the loop stops that request. Both remove a `<think>` trace from the assistant text. `ChatWith` returns that trace in `Reply.Reasoning` when the server left it in the content. `Reasoning.Format` of `none` or `deepseek-legacy` keeps the tags. Set `Reasoning.Strip` to force either behavior.
 
+`Options.Parallel` is passed as `--parallel`. `0` leaves llama-server's default. A 4-bit 12B model uses `1` so the process keeps a single KV cache slot. `Options.ReasoningBudget` is passed as `--reasoning-budget`. `0` leaves the server default. Qwen3.5-4B uses `1024`. Per-request reasoning format and `enable_thinking` stay on the chat request. `Options.NoMMProj` passes `--no-mmproj`, so a model file does not load a projector. `Options.Alias` is passed as `--alias` when `Start` launches the process.
+
+`Start` with a fixed `Port` uses a llama-server that is already listening there when `/health` is ready and `/v1/models` lists this model. The id matches `Options.Alias`, the model path, or the file name. `Stop` unloads that model and stops the process. A different listener on the port returns an error. `Port` of `0` starts a new process. Cancelling the context passed to `Start` stops a process `Start` launched. `StartRouter` reuses a listener whose model list is empty.
+
 `ChatWith` posts that request with reasoning options. `Reasoning.Effort` is sent as `reasoning_effort`. `EffortNone` disables thinking. The other `Effort` constants are the levels llama-server documents, and any other single token is passed through to the chat template. `Reasoning.Format` is `none`, `auto`, `deepseek`, or `deepseek-legacy`. `Reasoning.EnableThinking` sets `chat_template_kwargs.enable_thinking`. `Reply.Reasoning` carries `reasoning_content` when the server parses thoughts into that field.
 
 `Stream` uses the same options and `Deltas` yields assistant text on `Content` and thinking text on `Reasoning`. `Reasoning.Control` arms `/v1/chat/completions/control` for that completion. `EndReasoning` sends action `reasoning_end`, which ends the thinking block so the model continues with the answer. Call it while ranging `Deltas`. It waits until the completion id has been read, and it can be called from another goroutine. `Close` stops the request.
@@ -263,7 +267,7 @@ for token, err := range srv.ChatStream(ctx, []serve.Message{
 
 `Keep` sends the same streaming request with the header `X-Conversation-Id`. After `Close`, llama-server continues that generation. `Stream` leaves the header unset, and the server cancels the generation when the request ends. `Reuse` reads `GET /v1/stream` from a byte offset. Pass `Stream.Offset` so the next read starts on a line boundary. `Offset` counts each SSE line the parser has consumed, including its trailing newline. A blank line after `data: [DONE]` can stay unread, and reading it again yields no token. `Reuse` strips `<think>` traces from the bytes it receives. A think block that opened before that offset can appear in the content, because the resumed stream starts a new scan. `Shutdown` sends `DELETE /v1/stream` and cancels the kept generation. The call succeeds when that id is already gone. `Lookup` posts conversation ids to `/v1/streams/lookup`. An id also matches a session stored as `<id>::<model>`. An empty list returns no sessions and makes no request. A kept id holds the generation until `Shutdown`, or until llama-server discards the session.
 
-`StartRouter` launches llama-server with no model loaded. That is the process the web UI uses to download weights. `Download` posts a Hugging Face tag, such as `ggml-org/gemma-3-4b-it-GGUF:Q4_K_M`, to `/models`. Leaving the sidecar list empty lets the server also fetch `mmproj` when the repository has one. `DownloadEvents` reads `/models/sse`. A `download_progress` event lists each weight file with the bytes received and the file size. `PauseDownload` keeps the partial files. `RemoveDownload` deletes them. `Models` returns the same list the web UI shows, including a download that is still in progress.
+`StartRouter` launches llama-server with no model loaded. That is the process the web UI uses to download weights. `Download` posts a Hugging Face tag, such as `ggml-org/gemma-3-4b-it-GGUF:Q4_K_M`, to `/models`. A nil sidecar list omits the field, and llama-server fetches `mmproj` when the repository has one. An empty list sends `[]` and downloads the model with no projector and no draft. `DownloadEvents` reads `/models/sse`. A `download_progress` event lists each weight file with the bytes received and the file size. `PauseDownload` keeps the partial files. `RemoveDownload` deletes them. `Models` returns the same list the web UI shows, including a download that is still in progress.
 
 `WithModel` chooses which loaded model answers. The router reads the `model` field on `/v1/chat/completions` and forwards the request to that model. The name is the same tag passed to `Download`, such as `ggml-org/gemma-4-12B-it-GGUF:Q4_K_M` or `unsloth/Qwen3.5-4B-GGUF:Q4_K_M`. Cover and Application each keep a handle, so a router with both models loaded can answer from either one. `EndReasoning` sends that name on `/v1/chat/completions/control` so the router reaches the instance that is generating. An empty name omits the field. A server started with one GGUF file leaves it unset. A name that contains a newline is rejected. Stop on either handle stops the process.
 
@@ -409,6 +413,56 @@ if err != nil {
 }
 log.Println(reply.Content)
 ```
+
+### Grok
+
+Import `llm/grok` to call the Grok chat completions API at `https://api.x.ai/v1`. `New` takes the API key and sends it as a bearer token. The key is the value of `XAI_API_KEY` from the xAI console. `New` uses the model `grok-4.7`. `WithModel` selects another model id.
+
+```go
+maxTokens := 400
+client, err := grok.New(os.Getenv("XAI_API_KEY"))
+if err != nil {
+	log.Fatal(err)
+}
+
+reply, err := client.Chat(ctx, grok.Turn{
+	Messages: []grok.Message{
+		{Role: "user", Content: "Hello"},
+	},
+	Effort: grok.EffortLow,
+}, grok.Sampling{MaxTokens: &maxTokens})
+if err != nil {
+	log.Fatal(err)
+}
+log.Println(reply.Content)
+
+for event, err := range client.ChatStream(ctx, grok.Turn{
+	Messages: []grok.Message{
+		{Role: "user", Content: "Hello"},
+	},
+	Effort: grok.EffortHigh,
+}) {
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Print(event.Text)
+	if event.Reply != nil {
+		log.Println(event.Reply.ID)
+	}
+}
+```
+
+`Chat` posts the turn to `https://api.x.ai/v1/chat/completions` and returns the assistant text in `Reply.Content`. `Reply.ID` is the completion id. Roles are `system`, `user`, and `assistant`. `Chat` and `ChatStream` remove a `<think>` trace from that text. A trace split across stream deltas is removed as well. The text inside the trace is dropped.
+
+`Turn.Effort` is sent as `reasoning_effort`. Empty leaves the API default. `EffortLow`, `EffortHigh`, and `EffortXHigh` are the accepted values.
+
+`Sampling` sets the limits on that request. `Chat` and `ChatStream` each take one `Sampling` value. `Temperature`, `TopP`, and `MaxTokens` are sent as `temperature`, `top_p`, and `max_completion_tokens`. `MaxTokens` caps the visible answer. A nil field is omitted. A non-nil field is sent, including zero. A negative `MaxTokens` is rejected.
+
+`ChatStream` sets `stream` and yields each assistant text delta on `Event.Text`. The last event has an empty `Text` and the completed response on `Event.Reply`. Ending the loop stops that request. The client does not set its own timeout. Cancelling `ctx` stops the call.
+
+A response other than 200 is a `StatusError`. `Status` is the HTTP status code. A caller uses `401` and `403` for a rejected key, `402` for missing credits, and `429` for a rate limit.
+
+`New` rejects an empty key. `Chat` and `ChatStream` reject a nil context before they send the request. `WithBaseURL` points the client at another absolute http or https URL, which is how a test server stands in for `api.x.ai`.
 
 To choose a tool from the catalog:
 

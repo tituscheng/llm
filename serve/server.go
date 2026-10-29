@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,19 @@ type Options struct {
 	Port int
 	// Context is the context size passed to llama-server. 0 leaves its default.
 	Context int
+	// Parallel is the KV cache slot count, passed as --parallel.
+	// 0 leaves llama-server's default. A 4-bit 12B model uses 1 so it keeps a single slot.
+	Parallel int
+	// ReasoningBudget is the thinking token cap, passed as --reasoning-budget.
+	// 0 leaves the server default. Qwen3.5-4B uses 1024.
+	// Per-request reasoning format and enable_thinking stay on the chat request.
+	ReasoningBudget int
+	// NoMMProj passes --no-mmproj, so a local model does not load a projector.
+	NoMMProj bool
+	// Alias is the model id passed as --alias when Start launches the process.
+	// Empty omits the flag. A server already listening is reused when its model
+	// id equals Alias, the model path, or the file name.
+	Alias string
 }
 
 // Server is a running llama-server process.
@@ -61,6 +75,12 @@ type Server struct {
 
 	// model is the chat request model field. Empty omits it.
 	model string
+
+	// adoptedStop releases a server that was already listening. Handles from
+	// WithModel share it. Nil when Start launched the process.
+	adoptedStop *sync.Once
+	listenPort  int
+	unloadID    string
 }
 
 // WithModel returns a handle that sends name as the model field on chat requests.
@@ -77,25 +97,34 @@ func (s *Server) WithModel(name string) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		baseURL: s.baseURL,
-		cmd:     s.cmd,
-		client:  s.client,
-		cancel:  s.cancel,
-		done:    s.done,
-		stderr:  s.stderr,
-		model:   name,
+		baseURL:     s.baseURL,
+		cmd:         s.cmd,
+		client:      s.client,
+		cancel:      s.cancel,
+		done:        s.done,
+		stderr:      s.stderr,
+		model:       name,
+		adoptedStop: s.adoptedStop,
+		listenPort:  s.listenPort,
+		unloadID:    s.unloadID,
 	}, nil
 }
 
 // Start launches llama-server and returns after /health reports ready.
-// Cancelling ctx stops the process. Call Stop when the server is no longer needed.
+// When Port is set and that address is already serving this model, Start uses
+// the running process. Cancelling ctx stops a process Start launched.
+// Call Stop when the server is no longer needed. Stop also stops a server
+// that was already listening.
 func Start(ctx context.Context, opts Options) (*Server, error) {
 	return launch(ctx, opts, false)
 }
 
 // StartRouter launches llama-server with no model loaded.
 // The web UI downloads weights through this process.
-// Options.Model must be empty. Cancelling ctx stops the process.
+// Options.Model must be empty.
+// When Port is set and that address is already a llama-server with no model
+// loaded, StartRouter uses that process.
+// Cancelling ctx stops a process StartRouter launched.
 func StartRouter(ctx context.Context, opts Options) (*Server, error) {
 	return launch(ctx, opts, true)
 }
@@ -104,6 +133,23 @@ func launch(ctx context.Context, opts Options, router bool) (*Server, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("nil context")
 	}
+	if err := validateOptions(opts, router); err != nil {
+		return nil, err
+	}
+	if opts.Port != 0 {
+		host := opts.Host
+		if host == "" {
+			host = defaultHost
+		}
+		srv, reused, err := reuseListening(ctx, opts, router, host, opts.Port)
+		if err != nil || reused {
+			return srv, err
+		}
+	}
+	return spawn(ctx, opts, router)
+}
+
+func spawn(ctx context.Context, opts Options, router bool) (*Server, error) {
 	bin, model, host, port, err := prepare(opts, router)
 	if err != nil {
 		return nil, err
@@ -116,9 +162,21 @@ func launch(ctx context.Context, opts Options, router bool) (*Server, error) {
 	}
 	if !router {
 		args = append(args, "-m", model)
+		if alias := strings.TrimSpace(opts.Alias); alias != "" {
+			args = append(args, "--alias", alias)
+		}
 	}
 	if opts.Context > 0 {
 		args = append(args, "--ctx-size", strconv.Itoa(opts.Context))
+	}
+	if opts.Parallel > 0 {
+		args = append(args, "--parallel", strconv.Itoa(opts.Parallel))
+	}
+	if opts.ReasoningBudget > 0 {
+		args = append(args, "--reasoning-budget", strconv.Itoa(opts.ReasoningBudget))
+	}
+	if opts.NoMMProj {
+		args = append(args, "--no-mmproj")
 	}
 	cmd := exec.CommandContext(runCtx, bin, args...)
 	logs := &tailBuf{max: stderrLimit}
@@ -148,8 +206,14 @@ func launch(ctx context.Context, opts Options, router bool) (*Server, error) {
 }
 
 // Stop kills llama-server and its child processes. A second call is a no-op.
+// A server that was already listening is unloaded and stopped too.
 func (s *Server) Stop() error {
-	if s.cancel != nil {
+	if s.adoptedStop != nil {
+		s.adoptedStop.Do(func() {
+			s.releaseAdopted()
+			close(s.done)
+		})
+	} else if s.cancel != nil {
 		s.stopOnce.Do(func() { s.cancel() })
 	}
 	if s.done != nil {
@@ -241,15 +305,37 @@ func (s *Server) exitError() error {
 	return fmt.Errorf("llama-server exited: %w: %s", err, text)
 }
 
-func prepare(opts Options, router bool) (bin, model, host string, port int, err error) {
+func validateOptions(opts Options, router bool) error {
 	if router {
 		if opts.Model != "" {
-			return "", "", "", 0, fmt.Errorf("router mode does not load a model")
+			return fmt.Errorf("router mode does not load a model")
 		}
-	} else {
-		if opts.Model == "" {
-			return "", "", "", 0, fmt.Errorf("model path is empty")
-		}
+	} else if opts.Model == "" {
+		return fmt.Errorf("model path is empty")
+	}
+	if opts.Port < 0 || opts.Port > 65535 {
+		return fmt.Errorf("invalid port %d", opts.Port)
+	}
+	if opts.Context < 0 {
+		return fmt.Errorf("invalid context size %d", opts.Context)
+	}
+	if opts.Parallel < 0 {
+		return fmt.Errorf("invalid parallel %d", opts.Parallel)
+	}
+	if opts.ReasoningBudget < 0 {
+		return fmt.Errorf("invalid reasoning budget %d", opts.ReasoningBudget)
+	}
+	if strings.ContainsAny(opts.Alias, "\r\n") {
+		return fmt.Errorf("invalid alias")
+	}
+	return nil
+}
+
+func prepare(opts Options, router bool) (bin, model, host string, port int, err error) {
+	if err := validateOptions(opts, router); err != nil {
+		return "", "", "", 0, err
+	}
+	if !router {
 		info, err := os.Stat(opts.Model)
 		if err != nil {
 			return "", "", "", 0, fmt.Errorf("model: %w", err)
@@ -257,12 +343,6 @@ func prepare(opts Options, router bool) (bin, model, host string, port int, err 
 		if !info.Mode().IsRegular() {
 			return "", "", "", 0, fmt.Errorf("model %q is not a file", opts.Model)
 		}
-	}
-	if opts.Port < 0 || opts.Port > 65535 {
-		return "", "", "", 0, fmt.Errorf("invalid port %d", opts.Port)
-	}
-	if opts.Context < 0 {
-		return "", "", "", 0, fmt.Errorf("invalid context size %d", opts.Context)
 	}
 	bin, err = resolveBin(opts.Bin)
 	if err != nil {

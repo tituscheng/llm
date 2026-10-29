@@ -10,3 +10,5 @@ import (
 func configureCommand(cmd *exec.Cmd) {
 	cmd.WaitDelay = 200 * time.Millisecond
 }
+
+func stopListening(int) {}

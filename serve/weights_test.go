@@ -73,6 +73,20 @@ func TestDownloadWeights(t *testing.T) {
 		t.Fatalf("sidecars present: %s", got)
 	}
 
+	if err := server.Download(context.Background(), model, []string{}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	got = append([]byte(nil), body...)
+	mu.Unlock()
+	var empty map[string]json.RawMessage
+	if err := json.Unmarshal(got, &empty); err != nil {
+		t.Fatal(err)
+	}
+	if string(empty["sidecars"]) != "[]" {
+		t.Fatalf("empty sidecars %s", got)
+	}
+
 	if err := server.Download(context.Background(), model, []string{SidecarMMProj, SidecarMTP}); err != nil {
 		t.Fatal(err)
 	}

@@ -16,7 +16,8 @@ import (
 )
 
 // Sidecar kinds llama-server downloads with a model.
-// An empty list leaves the server default, which also fetches mmproj.
+// A nil list leaves the server default, which also fetches mmproj.
+// An empty list downloads the model with no sidecars.
 const (
 	SidecarMMProj = "mmproj"
 	SidecarMTP    = "mtp"
@@ -58,9 +59,11 @@ type CachedModel struct {
 
 // Download asks llama-server to fetch a Hugging Face model tag.
 // model looks like "ggml-org/gemma-3-4b-it-GGUF:Q4_K_M".
-// A nil or empty sidecars list is omitted, so the server also fetches mmproj
-// when the repository has one. The call returns when the server accepts the
-// download. Follow the files with DownloadEvents or Models.
+// A nil sidecars list omits the field, and the server fetches mmproj when the
+// repository has one. An empty list sends [] and downloads the model with no
+// projector and no draft, which is the router form of --no-mmproj.
+// The call returns when the server accepts the download. Follow the files
+// with DownloadEvents or Models.
 // The server must be running in router mode. StartRouter launches that mode.
 func (s *Server) Download(ctx context.Context, model string, sidecars []string) error {
 	if ctx == nil {
@@ -72,14 +75,34 @@ func (s *Server) Download(ctx context.Context, model string, sidecars []string) 
 	if err := validateSidecars(sidecars); err != nil {
 		return err
 	}
-	payload, err := json.Marshal(struct {
-		Model    string   `json:"model"`
-		Sidecars []string `json:"sidecars,omitempty"`
-	}{Model: model, Sidecars: sidecars})
+	payload, err := downloadPayload(model, sidecars)
 	if err != nil {
-		return fmt.Errorf("encode download: %w", err)
+		return err
 	}
 	return s.postModel(ctx, "/models", payload, "download")
+}
+
+func downloadPayload(model string, sidecars []string) ([]byte, error) {
+	if sidecars == nil {
+		payload, err := json.Marshal(struct {
+			Model string `json:"model"`
+		}{Model: model})
+		if err != nil {
+			return nil, fmt.Errorf("encode download: %w", err)
+		}
+		return payload, nil
+	}
+	if len(sidecars) == 0 {
+		sidecars = []string{}
+	}
+	payload, err := json.Marshal(struct {
+		Model    string   `json:"model"`
+		Sidecars []string `json:"sidecars"`
+	}{Model: model, Sidecars: sidecars})
+	if err != nil {
+		return nil, fmt.Errorf("encode download: %w", err)
+	}
+	return payload, nil
 }
 
 // PauseDownload posts the model to /models/unload.
