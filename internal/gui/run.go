@@ -1,5 +1,5 @@
-// Package gui implements a Gio window for selecting and installing
-// embedded inference binaries into the current directory.
+// Package gui implements a Gio window for compiling inference tools
+// from upstream source into ~/.llm/tools.
 package gui
 
 import (
@@ -13,6 +13,8 @@ import (
 	"gioui.org/text"
 	"gioui.org/unit"
 	"gioui.org/widget/material"
+
+	"llm/install"
 )
 
 // Main opens the installer window. It must run on the program's main
@@ -37,9 +39,9 @@ func run() error {
 		app.MinSize(unit.Dp(760), unit.Dp(500)),
 	)
 
-	dest, err := os.Getwd()
+	dest, err := install.ToolsDir()
 	if err != nil {
-		return fmt.Errorf("working directory: %w", err)
+		return err
 	}
 
 	th := material.NewTheme()
@@ -56,6 +58,7 @@ func run() error {
 	for {
 		switch e := w.Event().(type) {
 		case app.DestroyEvent:
+			ui.stop()
 			return e.Err
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)

@@ -5,36 +5,36 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"llm/internal/tools"
+	"llm/install"
 )
 
 var audioDownloadCmd = &cobra.Command{
 	Use:       "download [binary]",
-	Short:     "Download an embedded audio inference binary",
-	Long:      "Lists the embedded Apple Silicon audio binaries and copies the selected one into the current directory.",
+	Short:     "Compile the latest audio inference binary",
+	Long:      "Compiles a selected Apple Silicon audio tool from upstream source into ~/.llm/tools.",
 	Args:      cobra.MatchAll(cobra.MaximumNArgs(1), cobra.OnlyValidArgs),
-	ValidArgs: audioBinaryNames(),
+	ValidArgs: audioToolNames(),
 	RunE:      runAudioDownload,
 }
 
-func audioBinaryNames() []string {
-	cat, ok := tools.CategoryByID("audio")
+func audioToolNames() []string {
+	cat, ok := install.CategoryByID("audio")
 	if !ok {
 		return []string{}
 	}
-	return binaryNames(cat.Binaries)
+	return toolNames(cat.Tools)
 }
 
 func runAudioDownload(cmd *cobra.Command, args []string) error {
-	cat, ok := tools.CategoryByID("audio")
+	cat, ok := install.CategoryByID("audio")
 	if !ok {
 		return fmt.Errorf("audio category is not defined")
 	}
-	bin, err := selectBinary(cmd, cat, args)
+	tool, err := selectTool(cmd, cat, args)
 	if err != nil {
 		return err
 	}
-	return installToCWD(bin)
+	return compileTool(cmd, tool)
 }
 
 func init() {

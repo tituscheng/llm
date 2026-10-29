@@ -19,15 +19,12 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
-	"llm/internal/install"
-	"llm/internal/scripts"
-	"llm/internal/taskrun"
-	"llm/internal/tools"
+	"llm/install"
 )
 
-type scriptRunner func(ctx context.Context, name, dest string, stdout, stderr io.Writer) error
+type toolInstaller func(ctx context.Context, name string, stdout, stderr io.Writer) error
 
-var runScript scriptRunner = taskrun.Run
+var runInstall toolInstaller = install.Install
 
 type (
 	C = layout.Context
@@ -47,12 +44,11 @@ type ui struct {
 	win  *app.Window
 	th   *material.Theme
 	dest string
-	cats []tools.Category
+	cats []install.Category
 
 	category widget.Enum
 	binary   widget.Enum
 	install  widget.Clickable
-	script   widget.Clickable
 	close    widget.Clickable
 	scrim    widget.Clickable
 	list     widget.List
@@ -66,16 +62,17 @@ type ui struct {
 	modalTitle string
 	logLines   []string
 	cancel     context.CancelFunc
+	installWG  sync.WaitGroup
 }
 
 func newUI(win *app.Window, th *material.Theme, dest string) *ui {
-	cats := tools.Categories()
+	cats := install.Categories()
 	u := &ui{
 		win:    win,
 		th:     th,
 		dest:   dest,
 		cats:   cats,
-		status: "Select a category and binary, then Install or Install Script.",
+		status: "Select a category and binary, then Install.",
 		list: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
@@ -85,8 +82,8 @@ func newUI(win *app.Window, th *material.Theme, dest string) *ui {
 	}
 	if len(cats) > 0 {
 		u.category.Value = cats[0].ID
-		if len(cats[0].Binaries) > 0 {
-			u.binary.Value = cats[0].Binaries[0].Name
+		if len(cats[0].Tools) > 0 {
+			u.binary.Value = cats[0].Tools[0].Name
 		}
 	}
 	return u
@@ -106,9 +103,6 @@ func (ui *ui) Layout(gtx C) D {
 		ui.syncBinary()
 		for ui.install.Clicked(gtx) {
 			ui.startInstall()
-		}
-		for ui.script.Clicked(gtx) {
-			ui.startScript()
 		}
 	} else {
 		for ui.close.Clicked(gtx) {
@@ -151,7 +145,7 @@ func (ui *ui) layoutHeader(gtx C) D {
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 			layout.Rigid(func(gtx C) D {
-				l := material.Body1(ui.th, "Pick a category and binary. Install copies the embedded build; Install Script compiles the latest sources.")
+				l := material.Body1(ui.th, "Pick a category and binary. Install compiles the latest source into ~/.llm/tools.")
 				l.Color = rgb(0x9aa0a6)
 				return l.Layout(gtx)
 			}),
@@ -207,7 +201,7 @@ func (ui *ui) layoutCategories(gtx C) D {
 	})
 }
 
-func (ui *ui) categoryButton(gtx C, cat tools.Category) D {
+func (ui *ui) categoryButton(gtx C, cat install.Category) D {
 	gtx.Constraints.Min.X = gtx.Constraints.Max.X
 	selected := ui.category.Value == cat.ID
 	hovered, _ := ui.category.Hovered()
@@ -219,8 +213,8 @@ func (ui *ui) categoryButton(gtx C, cat tools.Category) D {
 		bg = rgb(0x1e222b)
 	}
 
-	count := fmt.Sprintf("%d", len(cat.Binaries))
-	if len(cat.Binaries) == 1 {
+	count := fmt.Sprintf("%d", len(cat.Tools))
+	if len(cat.Tools) == 1 {
 		count += " binary"
 	} else {
 		count += " binaries"
@@ -265,7 +259,7 @@ func (ui *ui) layoutBinaries(gtx C) D {
 	if !ok {
 		return D{}
 	}
-	bins := cat.Binaries
+	bins := cat.Tools
 
 	return layout.Inset{
 		Top: unit.Dp(16), Bottom: unit.Dp(16),
@@ -295,7 +289,7 @@ func (ui *ui) layoutBinaries(gtx C) D {
 	})
 }
 
-func (ui *ui) binaryCard(gtx C, bin tools.Binary) D {
+func (ui *ui) binaryCard(gtx C, bin install.Tool) D {
 	gtx.Constraints.Min.X = gtx.Constraints.Max.X
 	selected := ui.binary.Value == bin.Name
 	hovered, _ := ui.binary.Hovered()
@@ -307,7 +301,7 @@ func (ui *ui) binaryCard(gtx C, bin tools.Binary) D {
 		bg = rgb(0x1e222b)
 	}
 
-	meta := bin.Version + "  ·  " + tools.FormatSize(bin.Size())
+	meta := "latest source"
 	return ui.binary.Layout(gtx, bin.Name, func(gtx C) D {
 		return rounded(gtx, 10, bg, func(gtx C) D {
 			return layout.Inset{
@@ -373,7 +367,7 @@ func (ui *ui) layoutFooter(gtx C) D {
 	summary := "No binary selected"
 	destLine := ui.dest
 	if ok {
-		summary = bin.Name + "  ·  " + tools.FormatSize(bin.Size())
+		summary = bin.Name
 		destLine = filepath.Join(ui.dest, bin.Name)
 	}
 
@@ -401,23 +395,6 @@ func (ui *ui) layoutFooter(gtx C) D {
 						)
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
-					layout.Rigid(func(gtx C) D {
-						label := "Install Script"
-						hasScript := ok && scripts.Has(bin.Name)
-						btnCtx := gtx
-						if busy || !hasScript {
-							btnCtx = btnCtx.Disabled()
-						}
-						btn := material.Button(ui.th, &ui.script, label)
-						btn.Background = rgb(0x3a414d)
-						btn.CornerRadius = unit.Dp(8)
-						btn.Inset = layout.Inset{
-							Top: unit.Dp(10), Bottom: unit.Dp(10),
-							Left: unit.Dp(16), Right: unit.Dp(16),
-						}
-						return btn.Layout(btnCtx)
-					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx C) D {
 						label := "Install"
 						btnCtx := gtx
@@ -449,19 +426,19 @@ func (ui *ui) layoutFooter(gtx C) D {
 	})
 }
 
-func (ui *ui) currentCategory() (tools.Category, bool) {
+func (ui *ui) currentCategory() (install.Category, bool) {
 	for _, cat := range ui.cats {
 		if cat.ID == ui.category.Value {
 			return cat, true
 		}
 	}
-	return tools.Category{}, false
+	return install.Category{}, false
 }
 
-func (ui *ui) selectedBinary() (tools.Binary, bool) {
+func (ui *ui) selectedBinary() (install.Tool, bool) {
 	cat, ok := ui.currentCategory()
 	if !ok {
-		return tools.Binary{}, false
+		return install.Tool{}, false
 	}
 	return cat.Find(ui.binary.Value)
 }
@@ -475,11 +452,11 @@ func (ui *ui) syncBinary() {
 	if _, ok := cat.Find(ui.binary.Value); ok {
 		return
 	}
-	if len(cat.Binaries) == 0 {
+	if len(cat.Tools) == 0 {
 		ui.binary.Value = ""
 		return
 	}
-	ui.binary.Value = cat.Binaries[0].Name
+	ui.binary.Value = cat.Tools[0].Name
 }
 
 func (ui *ui) appendLog(line string) {
@@ -494,18 +471,11 @@ func (ui *ui) appendLog(line string) {
 	ui.invalidate()
 }
 
-func (ui *ui) startScript() {
+func (ui *ui) startInstall() {
 	bin, ok := ui.selectedBinary()
 	if !ok {
 		ui.mu.Lock()
 		ui.status = "Select a binary first."
-		ui.kind = statusErr
-		ui.mu.Unlock()
-		return
-	}
-	if !scripts.Has(bin.Name) {
-		ui.mu.Lock()
-		ui.status = "No compile script for " + bin.Name + "."
 		ui.kind = statusErr
 		ui.mu.Unlock()
 		return
@@ -519,18 +489,20 @@ func (ui *ui) startScript() {
 	ctx, cancel := context.WithCancel(context.Background())
 	ui.busy = true
 	ui.showModal = true
-	ui.modalTitle = "Install Script — " + bin.Name
+	ui.modalTitle = "Install — " + bin.Name
 	ui.status = "Compiling latest " + bin.Name + "…"
 	ui.kind = statusBusy
 	ui.logLines = nil
 	ui.logList.Position = layout.Position{}
 	ui.cancel = cancel
 	dest := ui.dest
+	ui.installWG.Add(1)
 	ui.mu.Unlock()
 
 	out := &lineWriter{append: ui.appendLog}
 	go func() {
-		err := runScript(ctx, bin.Name, dest, out, out)
+		defer ui.installWG.Done()
+		err := runInstall(ctx, bin.Name, out, out)
 		out.flush()
 		ui.mu.Lock()
 		ui.busy = false
@@ -556,71 +528,15 @@ func (ui *ui) invalidate() {
 	}
 }
 
-func (ui *ui) startInstall() {
-	bin, ok := ui.selectedBinary()
-	if !ok {
-		ui.mu.Lock()
-		ui.status = "Select a binary first."
-		ui.kind = statusErr
-		ui.mu.Unlock()
-		return
-	}
-
+// stop cancels an in-flight compile and waits until its process group is gone.
+func (ui *ui) stop() {
 	ui.mu.Lock()
-	if ui.busy {
-		ui.mu.Unlock()
-		return
-	}
-	ui.busy = true
-	ui.status = "Installing " + bin.Name + "…"
-	ui.kind = statusBusy
-	dest := ui.dest
+	cancel := ui.cancel
 	ui.mu.Unlock()
-
-	go func() {
-		res, err := install.ToDir(dest, bin)
-		ui.mu.Lock()
-		ui.busy = false
-		if err != nil {
-			ui.status = err.Error()
-			ui.kind = statusErr
-		} else {
-			ui.status = summarize(res)
-			ui.kind = statusOK
-		}
-		ui.mu.Unlock()
-		ui.invalidate()
-	}()
-}
-
-func summarize(res install.Result) string {
-	var copied, skipped int
-	var firstCopied, firstSkipped string
-	for _, file := range res.Files {
-		if file.Copied {
-			copied++
-			if firstCopied == "" {
-				firstCopied = file.Path
-			}
-			continue
-		}
-		skipped++
-		if firstSkipped == "" {
-			firstSkipped = file.Name
-		}
+	if cancel != nil {
+		cancel()
 	}
-	switch {
-	case copied > 0 && skipped > 0:
-		return fmt.Sprintf("Installed %s; %d already present.", firstCopied, skipped)
-	case copied > 1:
-		return fmt.Sprintf("Installed %s and %d sidecar(s).", firstCopied, copied-1)
-	case copied == 1:
-		return "Installed " + firstCopied
-	case skipped > 0:
-		return firstSkipped + " already exists in the working directory."
-	default:
-		return "Nothing to install."
-	}
+	ui.installWG.Wait()
 }
 
 func statusColor(kind statusKind) color.NRGBA {

@@ -1,0 +1,8 @@
+version: "3"
+
+tasks:
+  install:
+    desc: Install the llm command into GOBIN
+    dir: "{{.TASKFILE_DIR}}/cmd/llm"
+    cmds:
+      - go install .

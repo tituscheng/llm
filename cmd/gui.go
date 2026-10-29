@@ -9,7 +9,7 @@ import (
 var guiCmd = &cobra.Command{
 	Use:   "gui",
 	Short: "Install inference binaries with a graphical selector",
-	Long:  "Opens a window to pick a category (text, image, or audio) and install the selected binary into the current directory. Install copies the embedded build; Install Script compiles the latest upstream sources with Task.",
+	Long:  "Opens a window to pick a category (text, image, or audio) and compile the selected tool from the latest upstream source into ~/.llm/tools.",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return gui.Main()

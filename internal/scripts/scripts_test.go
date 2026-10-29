@@ -1,6 +1,11 @@
 package scripts
 
-import "testing"
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+)
 
 func TestFile(t *testing.T) {
 	want := []string{
@@ -26,17 +31,26 @@ func TestFile(t *testing.T) {
 		}
 	}
 	for _, name := range want {
-		if !Has(name) {
-			t.Errorf("missing Taskfile for %s", name)
-		}
-		data, err := File(name)
-		if err != nil {
-			t.Errorf("File(%q): %v", name, err)
-			continue
-		}
-		if len(data) == 0 {
-			t.Errorf("File(%q) is empty", name)
-		}
+		t.Run(name, func(t *testing.T) {
+			if !Has(name) {
+				t.Fatalf("missing install script for %s", name)
+			}
+			data, err := File(name)
+			if err != nil {
+				t.Fatalf("File(%q): %v", name, err)
+			}
+			if len(data) == 0 {
+				t.Fatal("script is empty")
+			}
+			path := filepath.Join(t.TempDir(), "install.sh")
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.Command("bash", "-n", path).CombinedOutput()
+			if err != nil {
+				t.Fatalf("bash -n: %v\n%s", err, out)
+			}
+		})
 	}
 	if _, err := File("missing"); err == nil {
 		t.Fatal("File(missing) succeeded")

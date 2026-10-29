@@ -9,67 +9,55 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"llm/internal/install"
-	"llm/internal/tools"
+	"llm/install"
 )
 
-func installToCWD(bin tools.Binary) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("failed to get current working directory: %w", err)
-	}
-
-	res, err := install.ToDir(cwd, bin)
+func compileTool(cmd *cobra.Command, tool install.Tool) error {
+	dir, err := install.ToolsDir()
 	if err != nil {
 		return err
 	}
-
-	for _, file := range res.Files {
-		switch {
-		case file.Copied && file.Version != "":
-			fmt.Printf("%s %s copied to %s\n", file.Name, file.Version, file.Path)
-		case file.Copied:
-			fmt.Printf("%s copied to %s\n", file.Name, file.Path)
-		default:
-			fmt.Printf("%s already exists at %s\n", file.Name, file.Path)
-		}
-	}
-	return nil
+	fmt.Fprintf(cmd.OutOrStdout(), "Compiling %s into %s\n", tool.Name, dir)
+	return install.Install(cmd.Context(), tool.Name, cmd.OutOrStdout(), cmd.ErrOrStderr())
 }
 
-func binaryNames(bins []tools.Binary) []string {
-	names := make([]string, 0, len(bins))
-	for _, bin := range bins {
-		names = append(names, bin.Name)
+func toolNames(tools []install.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
 	}
 	return names
 }
 
-func selectBinary(cmd *cobra.Command, cat tools.Category, args []string) (tools.Binary, error) {
-	if len(cat.Binaries) == 0 {
-		return tools.Binary{}, fmt.Errorf("no %s binaries are embedded", cat.ID)
+func selectTool(cmd *cobra.Command, cat install.Category, args []string) (install.Tool, error) {
+	if len(cat.Tools) == 0 {
+		return install.Tool{}, fmt.Errorf("no %s tools are available", cat.ID)
 	}
 
 	if len(args) == 1 {
-		bin, ok := cat.Find(args[0])
+		tool, ok := cat.Find(args[0])
 		if !ok {
-			return tools.Binary{}, fmt.Errorf("unknown %s binary %q", cat.ID, args[0])
+			return install.Tool{}, fmt.Errorf("unknown %s tool %q", cat.ID, args[0])
 		}
-		return bin, nil
+		return tool, nil
 	}
 
-	if len(cat.Binaries) == 1 {
-		return cat.Binaries[0], nil
+	if len(cat.Tools) == 1 {
+		return cat.Tools[0], nil
 	}
 
-	return promptBinary(cmd, cat)
+	return promptTool(cmd, cat)
 }
 
-func promptBinary(cmd *cobra.Command, cat tools.Category) (tools.Binary, error) {
+func promptTool(cmd *cobra.Command, cat install.Category) (install.Tool, error) {
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "Select a %s binary to copy into the current directory:\n\n", cat.ID)
-	for i, bin := range cat.Binaries {
-		fmt.Fprintf(out, "  %d) %-10s  %s\n", i+1, bin.Name, bin.Version)
+	fmt.Fprintf(out, "Select a %s tool to compile into ~/.llm/tools:\n\n", cat.ID)
+	for i, tool := range cat.Tools {
+		if tool.Note != "" {
+			fmt.Fprintf(out, "  %d) %-12s  %s\n", i+1, tool.Name, tool.Note)
+			continue
+		}
+		fmt.Fprintf(out, "  %d) %s\n", i+1, tool.Name)
 	}
 	fmt.Fprintln(out)
 	fmt.Fprint(out, "Enter number or name: ")
@@ -77,31 +65,31 @@ func promptBinary(cmd *cobra.Command, cat tools.Category) (tools.Binary, error) 
 	scanner := bufio.NewScanner(cmd.InOrStdin())
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
-			return tools.Binary{}, fmt.Errorf("read selection: %w", err)
+			return install.Tool{}, fmt.Errorf("read selection: %w", err)
 		}
 		if !isInteractive(cmd) {
-			return tools.Binary{}, fmt.Errorf("select a binary: llm %s download <name>", cat.ID)
+			return install.Tool{}, fmt.Errorf("select a tool: llm %s download <name>", cat.ID)
 		}
-		return tools.Binary{}, fmt.Errorf("no binary selected")
+		return install.Tool{}, fmt.Errorf("no tool selected")
 	}
 
 	choice := strings.TrimSpace(scanner.Text())
 	if choice == "" {
-		return tools.Binary{}, fmt.Errorf("no binary selected")
+		return install.Tool{}, fmt.Errorf("no tool selected")
 	}
 
 	if n, err := strconv.Atoi(choice); err == nil {
-		if n < 1 || n > len(cat.Binaries) {
-			return tools.Binary{}, fmt.Errorf("invalid selection %d", n)
+		if n < 1 || n > len(cat.Tools) {
+			return install.Tool{}, fmt.Errorf("invalid selection %d", n)
 		}
-		return cat.Binaries[n-1], nil
+		return cat.Tools[n-1], nil
 	}
 
-	bin, ok := cat.Find(choice)
+	tool, ok := cat.Find(choice)
 	if !ok {
-		return tools.Binary{}, fmt.Errorf("unknown %s binary %q", cat.ID, choice)
+		return install.Tool{}, fmt.Errorf("unknown %s tool %q", cat.ID, choice)
 	}
-	return bin, nil
+	return tool, nil
 }
 
 func isInteractive(cmd *cobra.Command) bool {

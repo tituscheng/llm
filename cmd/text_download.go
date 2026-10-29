@@ -5,27 +5,27 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"llm/internal/tools"
+	"llm/install"
 )
 
 var textDownloadCmd = &cobra.Command{
 	Use:   "download",
-	Short: "Download an embedded text inference binary",
-	Long:  "Copies the embedded llama-server binary into the current directory.",
+	Short: "Compile the latest text inference binary",
+	Long:  "Compiles the latest llama-server from upstream source into ~/.llm/tools.",
 	Args:  cobra.NoArgs,
 	RunE:  runTextDownload,
 }
 
 func runTextDownload(cmd *cobra.Command, args []string) error {
-	cat, ok := tools.CategoryByID("text")
+	cat, ok := install.CategoryByID("text")
 	if !ok {
 		return fmt.Errorf("text category is not defined")
 	}
-	bin, err := selectBinary(cmd, cat, args)
+	tool, err := selectTool(cmd, cat, args)
 	if err != nil {
 		return err
 	}
-	return installToCWD(bin)
+	return compileTool(cmd, tool)
 }
 
 func init() {
